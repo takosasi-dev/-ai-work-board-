@@ -23,7 +23,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 DEFAULT_AIS = ["Claude", "Muse", "Gemini"]
 STATUSES = ["todo", "in_progress", "waiting", "blocked", "done"]
 STATUS_LABEL = {
@@ -366,8 +366,8 @@ STATUS_COLORS = {  # 一覧の行の背景・文字色
     "blocked": ("#fde4e4", "#7a1616"),
     "done": ("#f2f2f2", "#8a8a8a"),
 }
-COLUMNS = (("#0", "title", "タイトル", 360), ("ai", "ai", "AI", 90), ("status", "status", "状態", 70),
-           ("progress", "progress", "進捗", 150), ("updated", "updated", "更新", 100))
+COLUMNS = (("#0", "title", "タイトル", 280), ("ai", "ai", "AI", 80), ("status", "status", "状態", 60),
+           ("progress", "progress", "進捗", 130), ("updated", "updated", "更新", 90))
 
 
 def run_gui():
@@ -465,20 +465,20 @@ def run_gui():
               command=lambda v: progress_var.set(round(float(v)))).grid(row=4, column=1, sticky="we", padx=4, pady=3)
     ttk.Spinbox(form, textvariable=progress_var, from_=0, to=100, increment=5, width=5).grid(row=4, column=2, sticky="w", padx=4)
     ttk.Label(form, text="このAIへの依頼").grid(row=5, column=0, sticky="nw", pady=3)
-    req_text = tk.Text(form, height=7, width=40, wrap="word", undo=True)
+    req_text = tk.Text(form, height=7, width=30, wrap="word", undo=True)
     req_text.grid(row=5, column=1, columnspan=2, sticky="nsew", padx=4, pady=3)
     ttk.Label(form, text="メモ").grid(row=6, column=0, sticky="nw", pady=3)
-    notes_text = tk.Text(form, height=5, width=40, wrap="word", undo=True)
+    notes_text = tk.Text(form, height=5, width=30, wrap="word", undo=True)
     notes_text.grid(row=6, column=1, columnspan=2, sticky="nsew", padx=4, pady=3)
     form.rowconfigure(5, weight=2)
     form.rowconfigure(6, weight=1)
 
     btns = ttk.Frame(form)
     btns.grid(row=7, column=0, columnspan=3, sticky="we", pady=(8, 0))
-    ttk.Button(btns, text="保存 (Ctrl+S)", command=lambda: save_current()).pack(side="left", padx=(0, 4))
+    ttk.Button(btns, text="保存", command=lambda: save_current()).pack(side="left", padx=(0, 4))
     ttk.Button(btns, text="完了にする", command=lambda: mark_done()).pack(side="left", padx=4)
     ttk.Button(btns, text="依頼文をコピー", command=lambda: copy_prompt()).pack(side="left", padx=4)
-    ttk.Button(btns, text="新規 (Ctrl+N)", command=lambda: new_task()).pack(side="left", padx=4)
+    ttk.Button(btns, text="新規", command=lambda: new_task()).pack(side="left", padx=4)
     ttk.Button(btns, text="削除", command=lambda: delete_task()).pack(side="right")
 
     ttk.Label(root, textvariable=status_msg, style="Status.TLabel", padding=(8, 4)).pack(fill="x")
