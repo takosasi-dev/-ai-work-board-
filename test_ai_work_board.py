@@ -51,12 +51,18 @@ def main():
         assert new_id in cli(path, "--list")
 
         # AIが進捗を文字列で書いても読める
-        raw = json.load(open(path, encoding="utf-8"))
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
         raw["tasks"][0]["progress"] = "30"
         raw["tasks"][1]["progress"] = "abc"
-        json.dump(raw, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+        raw["tasks"].append({"progress": None, "ai": "Copilot"})  # id もタイトルも無い1件
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            json.dump(raw, f, ensure_ascii=False)
         data = b.load_board(path)
         assert [t["progress"] for t in data["tasks"][:2]] == [30, 0]
+        assert data["tasks"][-1]["title"] == "(無題)" and "Copilot" in data["ais"]
+        b.visible_tasks(data["tasks"], query="x")
+        b.ai_summary(data)
 
     # 絞り込み・検索・並べ替え
     tasks = [

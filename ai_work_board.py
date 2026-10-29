@@ -108,14 +108,20 @@ def load_board(path):
     data.setdefault("version", 1)
     data.setdefault("ais", list(DEFAULT_AIS))
     data.setdefault("tasks", [])
+    # AIが手で書いたデータは欠けたり型が違ったりするので、ここで揃える
     for task in data["tasks"]:
         try:
             task["progress"] = int(task.get("progress", 0))
         except (TypeError, ValueError):
             task["progress"] = 0
+        task.setdefault("id", uuid.uuid4().hex[:8])
+        task.setdefault("title", "(無題)")
+        task.setdefault("ai", "Muse")
         task.setdefault("status", "todo")
         task.setdefault("request", "")
         task.setdefault("notes", "")
+        if task["ai"] not in data["ais"]:
+            data["ais"].append(task["ai"])
     return data
 
 
@@ -514,6 +520,8 @@ def run_gui():
         tasks = visible_tasks(state["data"]["tasks"], filter_ai.get(), filter_status.get(), query.get(), key, rev)
         tree.delete(*tree.get_children())
         for t in tasks:
+            if tree.exists(t["id"]):  # id が重複していたら先の1件だけ出す
+                continue
             tree.insert("", "end", iid=t["id"], text=t["title"], tags=(t["status"],),
                         values=(t["ai"], STATUS_LABEL.get(t["status"], t["status"]),
                                 progress_bar(t["progress"]), local_time(t.get("updated", ""))))
@@ -681,9 +689,10 @@ def run_gui():
                         say("外部の変更を読み込みました (編集中のタスクを最新にしました)")
                 else:
                     say("外部の変更を読み込みました")
-        except (OSError, ValueError):
-            pass  # 書き込み途中などで読めないときは次の周期で読み直す
-        root.after(POLL_MS, poll)
+        except Exception:
+            pass  # 書き込み途中や形の崩れたデータで読めないときは次の周期で読み直す
+        finally:
+            root.after(POLL_MS, poll)  # 何があっても監視は止めない
 
     for var in (filter_ai, filter_status, query):
         var.trace_add("write", lambda *_: refresh_list())
