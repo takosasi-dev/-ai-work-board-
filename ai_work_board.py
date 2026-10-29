@@ -392,6 +392,15 @@ def run_mcp(path):
     """MCP (JSON-RPC 2.0、1行1メッセージ) を標準入出力で話す。出力が壊れるので print は使わない。"""
     if sys.stdin is None or sys.stdout is None:  # 窓のアプリとして入出力なしで起動された
         return 1
+    try:
+        _serve_mcp(path)
+    except OSError:  # 相手が先に切れた。exe で例外を外に出すとエラーの窓が出るので黙って終わる
+        # 終わり際の flush でも同じ例外が出るので、出力先を捨て場に付け替える (Python 公式の SIGPIPE の項の方法)
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    return 0
+
+
+def _serve_mcp(path):
     out = sys.stdout.buffer
 
     def send(msg):
@@ -430,7 +439,6 @@ def run_mcp(path):
         else:
             reply["error"] = {"code": -32601, "message": f"method not found: {method}"}
         send(reply)
-    return 0
 
 
 def run_cli(argv):

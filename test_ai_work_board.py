@@ -96,6 +96,19 @@ def main():
         assert done["status"] == "done" and b.find_task(b.load_board(path), added["id"])["progress"] == 100
         assert {t["id"] for t in json.loads(b.mcp_call(path, "list_tasks", {"status": "done"}))} == {added["id"], new_id}
 
+        # 本物の相手のように1通ずつ返事を待つ。途中で相手が切れても例外を出さずに終わる
+        p = subprocess.Popen([sys.executable, os.path.join(HERE, "ai_work_board.py"), "--data", path, "--mcp"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        for i, m in enumerate((msgs[0], msgs[2]), 1):
+            p.stdin.write((json.dumps(m) + "\n").encode())
+            p.stdin.flush()
+            assert json.loads(p.stdout.readline())["id"] == m["id"], i
+        p.stdout.close()
+        p.stdin.write((json.dumps(msgs[2]) + "\n").encode())
+        p.stdin.close()
+        assert p.wait(timeout=30) == 0
+        assert p.stderr.read() == b""
+
     # 絞り込み・検索・並べ替え
     tasks = [
         {"id": "a1", "title": "Alpha", "ai": "Claude", "status": "done", "progress": 100, "request": "", "notes": "", "updated": "2026-01-02T00:00:00Z"},
