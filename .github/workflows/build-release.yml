@@ -1,0 +1,32 @@
+name: Build Windows exe and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build exe with PyInstaller
+        run: |
+          pip install pyinstaller
+          pyinstaller --onefile --windowed --name AIWorkBoard ai_work_board.py
+      - name: Publish to Release v0.1.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          if (gh release view v0.1.0 2>$null) {
+            gh release upload v0.1.0 dist\AIWorkBoard.exe --clobber
+          } else {
+            gh release create v0.1.0 dist\AIWorkBoard.exe --title "v0.1.0" --notes "AI Work Board v0.1.0 - Windows exe"
+          }
