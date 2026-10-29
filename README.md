@@ -81,13 +81,61 @@ python ai_work_board.py --export
 `--data` で `board.json` の場所を変えることもできます。
 環境変数 `AI_WORK_BOARD_DATA` でも指定できます。
 
+## AIツールに組み込む（MCP とスキル）
+
+AIに上のルールを毎回説明しなくても、ボードを読み書きできるようにする仕組みを2つ同梱しています。
+どちらか片方でも使えますが、両方入れると一番確実です。
+
+### MCP サーバー
+
+`AIWorkBoard.exe --mcp`（または `python ai_work_board.py --mcp`）で、AIツールから呼べる道具になります。
+窓は開きません。exe と同じフォルダの `board.json` を読み書きするので、GUIと同じボードが見えます。
+
+| 道具 | すること |
+|---|---|
+| `list_tasks` | 一覧（AI・状態・キーワードで絞り込み） |
+| `get_task` | 1件を読む |
+| `add_task` | 追加する |
+| `update_task` | 渡した項目だけ書き換える |
+| `complete_task` | 完了にする |
+
+削除の道具はありません（AIにタスクを消させないため）。下の `<exe のパス>` は、自分が置いた場所に読み替えてください。
+
+- **Claude Code**
+
+  ```text
+  claude mcp add --scope user ai-work-board -- "<exe のパス>" --mcp
+  ```
+
+- **Claude Desktop**: 設定の「開発者」→「設定を編集」で開く `claude_desktop_config.json` に足します。
+  **Gemini CLI** も `~/.gemini/settings.json` に同じ形で書けます。
+
+  ```json
+  {
+    "mcpServers": {
+      "ai-work-board": { "command": "<exe のパス>", "args": ["--mcp"] }
+    }
+  }
+  ```
+
+  JSON の中では `\` を `\\` と書きます（例: `C:\\Tools\\AIWorkBoard.exe`）。
+
+### スキル
+
+[`skills/ai-work-board/SKILL.md`](skills/ai-work-board/SKILL.md) は、AIに読み書きのルールと手順を教える説明書です。
+MCP が無い環境では、CLI か `board.json` を直接編集する方法に切り替えるよう書いてあります。
+
+- **Claude Code**: `skills/ai-work-board` フォルダを `~/.claude/skills/` にコピーします（プロジェクトごとなら `.claude/skills/`）。
+- **claude.ai / Claude Desktop**: [Releases](../../releases) の `ai-work-board-skill.zip` を、設定のスキルの画面からアップロードします。
+- **その他の AI ツール**: `skills/<名前>/SKILL.md` の形を読むツールなら、そのフォルダごと置けば使えます。
+
 ## 開発
 
 Python 3.11以上、標準ライブラリのみです。外部パッケージは要りません。
 
 ```text
 python ai_work_board.py
-python test_ai_work_board.py   # データとCLIの確認（窓は出ません）
+python test_ai_work_board.py   # データ・CLI・MCPの確認（窓は出ません）
 ```
 
 exe を作る場合（Windows）:

@@ -12,6 +12,8 @@ AI連携: このファイルと同じフォルダの board.json を読めば進�
     python ai_work_board.py --update <id> --progress 60 --status in_progress
     python ai_work_board.py --done <id>
     python ai_work_board.py --export
+  MCP サーバーとしても動く (Claude Code / Claude Desktop / Gemini CLI などに道具として渡す):
+    python ai_work_board.py --mcp
 GUIは標準ライブラリ(tkinter)のみで動く。WindowsでPyInstaller化して .exe にできる。
 """
 
@@ -23,7 +25,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 DEFAULT_AIS = ["Claude", "Muse", "Gemini"]
 STATUSES = ["todo", "in_progress", "waiting", "blocked", "done"]
 STATUS_LABEL = {
@@ -322,9 +324,119 @@ def cli_update(path, args):
     return 0
 
 
+# ---------------- MCP (Claude などに道具として渡す入口) ----------------
+
+MCP_INSTRUCTIONS = (
+    "AI Work Board のタスクを読み書きする道具です。作業を始める前に list_tasks で既存のタスクを確かめてください。"
+    "新しい依頼は add_task、進んだら update_task で status と progress を更新し、終わったら complete_task。"
+    "他の AI のタスクを消したり書き換えたりしないでください。人の名前やメールアドレスはタスクに入れないでください。"
+)
+_ID_PROP = {"id": {"type": "string", "description": "タスクの id (前方一致が1件だけなら短くてもよい)"}}
+_TASK_PROPS = {
+    "title": {"type": "string", "description": "タイトル"},
+    "ai": {"type": "string", "description": "担当の AI (Claude / Muse / Gemini など)"},
+    "status": {"type": "string", "enum": STATUSES,
+               "description": "todo=未着手 in_progress=進行中 waiting=待ち blocked=停滞 done=完了"},
+    "progress": {"type": "integer", "minimum": 0, "maximum": 100, "description": "進捗 (%)"},
+    "request": {"type": "string", "description": "この AI への依頼"},
+    "notes": {"type": "string", "description": "経緯や注意点"},
+}
+MCP_TOOLS = [
+    {"name": "list_tasks", "description": "タスクの一覧 (更新が新しい順)。ai・status・query (タイトル・依頼・メモ・id の部分一致) で絞れる。",
+     "inputSchema": {"type": "object", "properties": {
+         "ai": _TASK_PROPS["ai"], "status": _TASK_PROPS["status"], "query": {"type": "string"}}}},
+    {"name": "get_task", "description": "タスク1件を返す。",
+     "inputSchema": {"type": "object", "properties": _ID_PROP, "required": ["id"]}},
+    {"name": "add_task", "description": "タスクを追加して、そのタスクを返す (id が付く)。",
+     "inputSchema": {"type": "object", "properties": _TASK_PROPS, "required": ["title", "ai"]}},
+    {"name": "update_task", "description": "渡した項目だけ書き換えて、そのタスクを返す。",
+     "inputSchema": {"type": "object", "properties": {**_ID_PROP, **_TASK_PROPS}, "required": ["id"]}},
+    {"name": "complete_task", "description": "完了 (status=done, progress=100) にする。notes も一緒に書ける。",
+     "inputSchema": {"type": "object", "properties": {**_ID_PROP, "notes": _TASK_PROPS["notes"]}, "required": ["id"]}},
+]
+
+
+def mcp_call(path, name, args):
+    """道具を1回動かして結果の文字列を返す。毎回読み直して1件だけ書く (GUI や他の AI も同じファイルを書くため)。"""
+    if name not in {t["name"] for t in MCP_TOOLS}:
+        raise ValueError(f"知らない道具: {name}")
+    data = load_board(path)
+    if name == "list_tasks":
+        status = STATUS_LABEL.get(args.get("status"), "すべて")
+        tasks = visible_tasks(data["tasks"], args.get("ai") or "すべて", status, args.get("query") or "")
+        return json.dumps(tasks, ensure_ascii=False, indent=1)
+    fields = {k: args.get(k) for k in TASK_FIELDS}
+    if name == "complete_task":
+        fields.update(status="done", progress=100)
+    if fields["status"] is not None and fields["status"] not in STATUSES:
+        raise ValueError(f"status は {' / '.join(STATUSES)} のどれか")
+    if fields["progress"] is not None:
+        fields["progress"] = int(fields["progress"])
+    if name == "add_task":
+        if not fields["title"] or not fields["ai"]:
+            raise ValueError("title と ai が要ります")
+        task = apply_task(data, fields)
+    else:
+        task_id = str(args.get("id") or "")
+        task = find_task(data, task_id) if task_id else None
+        if task is None:
+            raise ValueError(f"id が見つからないか、複数に当たります: {task_id}")
+        if name == "get_task":
+            return json.dumps(task, ensure_ascii=False, indent=1)
+        apply_task(data, fields, task["id"])
+    save_board(path, data)
+    return json.dumps(task, ensure_ascii=False, indent=1)
+
+
+def run_mcp(path):
+    """MCP (JSON-RPC 2.0、1行1メッセージ) を標準入出力で話す。出力が壊れるので print は使わない。"""
+    if sys.stdin is None or sys.stdout is None:  # 窓のアプリとして入出力なしで起動された
+        return 1
+    out = sys.stdout.buffer
+
+    def send(msg):
+        out.write(json.dumps(msg, ensure_ascii=False).encode("utf-8") + b"\n")
+        out.flush()
+
+    for line in sys.stdin.buffer:
+        if not line.strip():
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
+            continue
+        if not isinstance(msg, dict) or "id" not in msg:
+            continue  # 通知には返事をしない
+        method, params = msg.get("method"), msg.get("params") or {}
+        reply = {"jsonrpc": "2.0", "id": msg["id"]}
+        if method == "initialize":
+            reply["result"] = {
+                "protocolVersion": params.get("protocolVersion", "2025-06-18"),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "ai-work-board", "version": VERSION},
+                "instructions": MCP_INSTRUCTIONS,
+            }
+        elif method == "ping":
+            reply["result"] = {}
+        elif method == "tools/list":
+            reply["result"] = {"tools": MCP_TOOLS}
+        elif method == "tools/call":
+            try:
+                text = mcp_call(path, params.get("name"), params.get("arguments") or {})
+                reply["result"] = {"content": [{"type": "text", "text": text}]}
+            except Exception as e:  # 道具の失敗は AI に返して、サーバーは止めない
+                reply["result"] = {"content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}], "isError": True}
+        else:
+            reply["error"] = {"code": -32601, "message": f"method not found: {method}"}
+        send(reply)
+    return 0
+
+
 def run_cli(argv):
     parser = argparse.ArgumentParser(prog="ai-work-board")
     parser.add_argument("--data", default=None, help="board.json のパス")
+    parser.add_argument("--mcp", action="store_true", help="MCP サーバーとして標準入出力で動く")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--export", action="store_true")
     parser.add_argument("--add", metavar="TITLE")
@@ -338,6 +450,8 @@ def run_cli(argv):
     parser.add_argument("--notes")
     args = parser.parse_args(argv)
     path = data_path(args.data)
+    if args.mcp:
+        return run_mcp(path)
     if args.list:
         return cli_list(path)
     if args.export:

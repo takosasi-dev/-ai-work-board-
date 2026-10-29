@@ -22,6 +22,8 @@ jobs:
         run: |
           pip install pyinstaller
           pyinstaller --onefile --windowed --name AIWorkBoard ai_work_board.py
+      - name: Zip the skill (folder inside the zip, / separators)
+        run: python -c "import zipfile; z = zipfile.ZipFile('dist/ai-work-board-skill.zip', 'w', zipfile.ZIP_DEFLATED); z.write('skills/ai-work-board/SKILL.md', 'ai-work-board/SKILL.md'); z.close()"
       - name: Publish to Release (tag = VERSION in ai_work_board.py)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -29,7 +31,7 @@ jobs:
         run: |
           $v = "v" + (python -c "import ai_work_board as a; print(a.VERSION)")
           if (gh release view $v 2>$null) {
-            gh release upload $v dist\AIWorkBoard.exe --clobber
+            gh release upload $v dist\AIWorkBoard.exe dist\ai-work-board-skill.zip --clobber
           } else {
-            gh release create $v dist\AIWorkBoard.exe --title $v --notes "AI Work Board $v - Windows exe"
+            gh release create $v dist\AIWorkBoard.exe dist\ai-work-board-skill.zip --title $v --notes "AI Work Board $v - Windows exe と、AIツール用のスキル (ai-work-board-skill.zip)"
           }

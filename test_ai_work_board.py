@@ -64,6 +64,38 @@ def main():
         b.visible_tasks(data["tasks"], query="x")
         b.ai_summary(data)
 
+        # MCP: -X utf8 も PYTHONIOENCODING も付けない (Claude などが素の python で起動したときと同じ)
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+        msgs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "add_task", "arguments": {"title": "MCPで足した仕事", "ai": "Claude", "request": "日本語の依頼"}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "update_task", "arguments": {"id": "nope"}}},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": "update_task", "arguments": {"id": "sample-m", "status": "bad"}}},
+            {"jsonrpc": "2.0", "id": 6, "method": "nope"},
+        ]
+        out = subprocess.run([sys.executable, os.path.join(HERE, "ai_work_board.py"), "--data", path, "--mcp"],
+                             input="".join(json.dumps(m, ensure_ascii=False) + "\n" for m in msgs).encode("utf-8"),
+                             capture_output=True, env=env, timeout=30)
+        assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
+        replies = [json.loads(l) for l in out.stdout.decode("utf-8").splitlines()]
+        assert [r["id"] for r in replies] == [1, 2, 3, 4, 5, 6]  # 通知には返事しない
+        assert replies[0]["result"]["serverInfo"]["version"] == b.VERSION
+        assert {t["name"] for t in replies[1]["result"]["tools"]} == {t["name"] for t in b.MCP_TOOLS}
+        added = json.loads(replies[2]["result"]["content"][0]["text"])
+        assert added["title"] == "MCPで足した仕事" and not replies[2]["result"].get("isError")
+        assert replies[3]["result"]["isError"] and replies[4]["result"]["isError"]
+        assert replies[5]["error"]["code"] == -32601
+        data = b.load_board(path)
+        assert b.find_task(data, added["id"])["request"] == "日本語の依頼"
+        assert b.find_task(data, "sample-muse-1")["status"] != "bad"
+        done = json.loads(b.mcp_call(path, "complete_task", {"id": added["id"], "notes": "済み"}))
+        assert done["status"] == "done" and b.find_task(b.load_board(path), added["id"])["progress"] == 100
+        assert {t["id"] for t in json.loads(b.mcp_call(path, "list_tasks", {"status": "done"}))} == {added["id"], new_id}
+
     # 絞り込み・検索・並べ替え
     tasks = [
         {"id": "a1", "title": "Alpha", "ai": "Claude", "status": "done", "progress": 100, "request": "", "notes": "", "updated": "2026-01-02T00:00:00Z"},
