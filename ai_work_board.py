@@ -23,7 +23,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 DEFAULT_AIS = ["Claude", "Muse", "Gemini"]
 STATUSES = ["todo", "in_progress", "waiting", "blocked", "done"]
 STATUS_LABEL = {
@@ -208,11 +208,6 @@ def local_time(iso):
     return dt.astimezone().strftime("%m/%d %H:%M")
 
 
-def progress_bar(progress, width=10):
-    filled = round(max(0, min(100, progress)) / 100 * width)
-    return "█" * filled + "░" * (width - filled) + f" {progress:>3}%"
-
-
 def visible_tasks(tasks, ai="すべて", status="すべて", query="", sort_key="updated", reverse=True):
     q = query.strip().lower()
     out = []
@@ -235,30 +230,41 @@ def visible_tasks(tasks, ai="すべて", status="すべて", query="", sort_key=
     return sorted(out, key=key, reverse=reverse)
 
 
+def summarize(name, tasks):
+    """{ai, count, avg (未完了の平均進捗), by (状態ごとの件数)}"""
+    open_tasks = [t for t in tasks if t["status"] != "done"]
+    by = {}
+    for t in tasks:
+        by[t["status"]] = by.get(t["status"], 0) + 1
+    avg = round(sum(t["progress"] for t in open_tasks) / len(open_tasks)) if open_tasks else 0
+    return {"ai": name, "count": len(tasks), "open": len(open_tasks), "avg": avg, "by": by}
+
+
 def ai_summary(data):
-    """AIごとに (ai, 件数, 未完了の平均進捗, 待ち, 停滞, 完了) を返す。"""
-    rows = []
-    for ai in data["ais"]:
-        tasks = [t for t in data["tasks"] if t["ai"] == ai]
-        open_tasks = [t for t in tasks if t["status"] != "done"]
-        avg = round(sum(t["progress"] for t in open_tasks) / len(open_tasks)) if open_tasks else 0
-        count = lambda s: sum(1 for t in tasks if t["status"] == s)
-        rows.append((ai, len(tasks), avg, count("waiting"), count("blocked"), count("done")))
-    return rows
+    return [summarize(ai, [t for t in data["tasks"] if t["ai"] == ai]) for ai in data["ais"]]
 
 
-def summary_text(row):
-    ai, n, avg, waiting, blocked, done = row
-    parts = [ai, f"{n}件"]
-    if n - done:
-        parts.append(f"平均{avg}%")
-    if waiting:
-        parts.append(f"待ち{waiting}")
-    if blocked:
-        parts.append(f"停滞{blocked}")
-    if done:
-        parts.append(f"完了{done}")
-    return "  ".join(parts)
+def lane_detail(row):
+    """レーンの件数の横に出す2行。"""
+    if not row["count"]:
+        first = "件"
+    elif row["open"]:
+        first = f"件  平均 {row['avg']}%"
+    else:
+        first = "件  すべて完了"
+    rest = [f"{STATUS_LABEL[s]} {row['by'][s]}" for s in ("waiting", "blocked", "done") if row["by"].get(s)]
+    return first + "\n" + "  ".join(rest)
+
+
+AI_COLORS = {"Claude": "#E0A458", "Muse": "#A98BFF", "Gemini": "#3FB6C6"}
+EXTRA_AI_COLORS = ("#6DC47A", "#EF7FA5", "#C9BC55", "#7F9CF5")
+
+
+def ai_color(ais, ai):
+    if ai in AI_COLORS:
+        return AI_COLORS[ai]
+    others = [a for a in ais if a not in AI_COLORS]
+    return EXTRA_AI_COLORS[others.index(ai) % len(EXTRA_AI_COLORS) if ai in others else 0]
 
 
 def request_prompt(task):
@@ -359,22 +365,61 @@ def run_cli(argv):
 # ---------------- GUI ----------------
 
 POLL_MS = 2000
-STATUS_COLORS = {  # 一覧の行の背景・文字色
-    "todo": ("#ffffff", "#222222"),
-    "in_progress": ("#e6f0fb", "#14365c"),
-    "waiting": ("#fff4d6", "#5c4300"),
-    "blocked": ("#fde4e4", "#7a1616"),
-    "done": ("#f2f2f2", "#8a8a8a"),
+THEMES = {
+    "dark": {
+        "bg": "#151A24", "surface": "#1D2330", "raised": "#283041", "line": "#323B4E", "field": "#121722",
+        "text": "#E7EAF1", "muted": "#8C95A8", "accent": "#6FA8FF", "accent_hover": "#8BB9FF",
+        "on_accent": "#0D1320", "select": "#2B3A57",
+        "status": {"todo": "#6B7488", "in_progress": "#6FA8FF", "waiting": "#E6B450", "blocked": "#EE6B6B",
+                   "done": "#4FBF85"},
+        "tint": {"waiting": "#24221A", "blocked": "#2A1D23"},
+    },
+    "light": {
+        "bg": "#E8ECF2", "surface": "#F8FAFC", "raised": "#DDE3EC", "line": "#C8D1DD", "field": "#FFFFFF",
+        "text": "#1B2230", "muted": "#5D6777", "accent": "#2F6FDB", "accent_hover": "#255FC2",
+        "on_accent": "#FFFFFF", "select": "#D3E2FB",
+        "status": {"todo": "#9AA3B2", "in_progress": "#2F6FDB", "waiting": "#C98F12", "blocked": "#D64545",
+                   "done": "#2E9A62"},
+        "tint": {"waiting": "#FBF3DE", "blocked": "#FBE7E7"},
+    },
 }
-COLUMNS = (("#0", "title", "タイトル", 280), ("ai", "ai", "AI", 80), ("status", "status", "状態", 60),
-           ("progress", "progress", "進捗", 130), ("updated", "updated", "更新", 90))
+COLUMNS = (("#0", "title", "タイトル", 250), ("ai", "ai", "AI", 76), ("status", "status", "状態", 60),
+           ("progress", "progress", "進捗", 56), ("updated", "updated", "更新", 104))
+
+
+def ui_settings_path(path):
+    return os.path.join(os.path.dirname(os.path.abspath(path)), "ai_work_board_ui.json")
+
+
+def load_ui_settings(path):
+    try:
+        with open(ui_settings_path(path), encoding="utf-8") as f:
+            settings = json.load(f)
+        return settings if isinstance(settings, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_ui_settings(path, settings):
+    try:
+        _write_atomic(ui_settings_path(path), json.dumps(settings, ensure_ascii=False))
+    except OSError:
+        pass  # 見た目の設定は保存できなくても動作に差し支えない
 
 
 def run_gui():
     import tkinter as tk
     from tkinter import font as tkfont, messagebox, ttk
 
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # 高DPIの画面でぼやけないように
+        except Exception:
+            pass
+
     path = data_path(None)
+    settings = load_ui_settings(path)
     state = {
         "data": load_board(path),
         "mtime": None,       # 最後に読んだ/書いた board.json の更新時刻
@@ -382,18 +427,39 @@ def run_gui():
         "seen": None,        # 編集を始めたときのそのタスクの写し (外部の更新の検出用)
         "snapshot": None,    # 編集を始めたときのフォームの値 (変更中かどうかの判定用)
         "sort": ("updated", True),
+        "theme": settings.get("theme") if settings.get("theme") in THEMES else "dark",
+        "bars": {},          # 一覧の進捗バーの画像 (状態, 進捗) -> PhotoImage
     }
 
     root = tk.Tk()
-    root.title(f"AI Work Board v{VERSION}")
-    root.geometry("1180x680")
-    root.minsize(900, 520)
+    root.title("AI Work Board")
+    scale = root.winfo_fpixels("1i") / 96
+
+    def px(n):
+        return int(round(n * scale))
+
+    root.geometry(f"{px(1240)}x{px(760)}")
+    root.minsize(px(960), px(600))
+
+    families = set(tkfont.families(root))
+
+    def pick(*names):
+        return next((n for n in names if n in families), tkfont.nametofont("TkDefaultFont").actual("family"))
+
+    jp = pick("BIZ UDPGothic", "Yu Gothic UI", "Meiryo UI", "Noto Sans CJK JP")
+    num = pick("Bahnschrift", "Segoe UI", jp)
+    F = {
+        "ui": tkfont.Font(root, family=jp, size=10),
+        "small": tkfont.Font(root, family=jp, size=9),
+        "bold": tkfont.Font(root, family=jp, size=10, weight="bold"),
+        "head": tkfont.Font(root, family=jp, size=12, weight="bold"),
+        "title": tkfont.Font(root, family=num, size=17, weight="bold"),
+        "big": tkfont.Font(root, family=num, size=22, weight="bold"),
+        "num": tkfont.Font(root, family=num, size=18, weight="bold"),
+    }
+    root.option_add("*Font", F["ui"])
     style = ttk.Style(root)
-    style.configure("Treeview", rowheight=26)
-    style.configure("Status.TLabel", foreground="#555555")
-    head_font = tkfont.nametofont("TkDefaultFont").copy()
-    head_font.configure(weight="bold")
-    style.configure("Head.TLabel", font=head_font)
+    style.theme_use("clam")
 
     filter_ai = tk.StringVar(value="すべて")
     filter_status = tk.StringVar(value="すべて")
@@ -404,84 +470,224 @@ def run_gui():
     def say(msg):
         status_msg.set(f"{datetime.now().strftime('%H:%M:%S')}  {msg}")
 
-    # --- 上部: AI別サマリー (クリックでそのAIに絞り込み) ---
-    summary = ttk.Frame(root, padding=(8, 8, 8, 0))
-    summary.pack(fill="x")
+    # --- 見出し ---
+    header = ttk.Frame(root, padding=(px(20), px(14), px(20), px(4)))
+    header.pack(fill="x")
+    ttk.Label(header, text="AI Work Board", font=F["title"]).pack(side="left")
+    ttk.Label(header, text=f"v{VERSION}", style="Muted.TLabel").pack(side="left", padx=(px(8), 0), pady=(px(6), 0))
+    ttk.Button(header, text="Markdown出力", command=lambda: export_now()).pack(side="right")
+    theme_btn = ttk.Button(header, command=lambda: toggle_theme())
+    theme_btn.pack(side="right", padx=px(8))
+    ttk.Button(header, text="新規タスク", command=lambda: new_task()).pack(side="right")
 
-    # --- 絞り込み ---
-    bar = ttk.Frame(root, padding=8)
+    # --- AIごとのレーン (押すとそのAIに絞り込み) ---
+    lanes = tk.Frame(root)
+    lanes.pack(fill="x", padx=px(20), pady=(px(10), px(4)))
+
+    # --- 検索と状態の絞り込み ---
+    bar = ttk.Frame(root, padding=(px(20), px(8)))
     bar.pack(fill="x")
-    ttk.Label(bar, text="検索").pack(side="left")
-    search_entry = ttk.Entry(bar, textvariable=query, width=28)
-    search_entry.pack(side="left", padx=(4, 12))
-    ttk.Label(bar, text="AI").pack(side="left")
-    ai_combo = ttk.Combobox(bar, textvariable=filter_ai, state="readonly", width=12)
-    ai_combo.pack(side="left", padx=(4, 12))
-    ttk.Label(bar, text="状態").pack(side="left")
-    st_combo = ttk.Combobox(bar, textvariable=filter_status, state="readonly", width=10,
-                            values=["すべて"] + [STATUS_LABEL[s] for s in STATUSES])
-    st_combo.pack(side="left", padx=4)
-    ttk.Button(bar, text="条件クリア", command=lambda: clear_filters()).pack(side="left", padx=8)
-    ttk.Label(bar, textvariable=count_msg, style="Status.TLabel").pack(side="left", padx=8)
-    ttk.Button(bar, text="Markdown出力", command=lambda: export_now()).pack(side="right")
+    ttk.Label(bar, text="検索", style="Muted.TLabel").pack(side="left")
+    search_entry = ttk.Entry(bar, textvariable=query, width=26)
+    search_entry.pack(side="left", padx=(px(8), px(18)))
+    for label in ["すべて"] + [STATUS_LABEL[s] for s in STATUSES]:
+        ttk.Radiobutton(bar, text=label, value=label, variable=filter_status,
+                        style="Pill.Toolbutton").pack(side="left", padx=(0, px(4)))
+    ttk.Label(bar, textvariable=count_msg, style="Muted.TLabel").pack(side="right")
+
+    # 本体より先に下へ置く (後から pack すると本体に押し出されて見切れる)
+    ttk.Label(root, textvariable=status_msg, style="Muted.TLabel", padding=(px(20), px(8))).pack(side="bottom", fill="x")
 
     # --- 本体: 左に一覧、右に編集 ---
     body = ttk.PanedWindow(root, orient="horizontal")
-    body.pack(fill="both", expand=True, padx=8)
+    body.pack(fill="both", expand=True, padx=px(20), pady=(px(4), 0))
 
-    list_frame = ttk.Frame(body)
+    list_frame = ttk.Frame(body, style="Card.TFrame")
     tree = ttk.Treeview(list_frame, columns=[c[0] for c in COLUMNS[1:]], show="tree headings", selectmode="browse")
     for col, key, label, width in COLUMNS:
-        tree.heading(col, text=label, command=lambda k=key: sort_by(k))
-        tree.column(col, width=width, minwidth=50, stretch=(col == "#0"))
-    for st, (bg, fg) in STATUS_COLORS.items():
-        tree.tag_configure(st, background=bg, foreground=fg)
+        tree.heading(col, text=label, anchor="e" if key == "progress" else "w", command=lambda k=key: sort_by(k))
+        tree.column(col, width=px(width), minwidth=px(50), stretch=(col == "#0"),
+                    anchor="e" if key == "progress" else "w")
     scroll = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=scroll.set)
-    tree.pack(side="left", fill="both", expand=True)
-    scroll.pack(side="left", fill="y")
+    tree.pack(side="left", fill="both", expand=True, padx=(px(6), 0), pady=px(6))
+    scroll.pack(side="left", fill="y", pady=px(6))
     body.add(list_frame, weight=3)
 
-    form = ttk.Frame(body, padding=(12, 0, 0, 0))
-    body.add(form, weight=2)
+    card = ttk.Frame(body, style="Card.TFrame")
+    body.add(card, weight=2)
+    stripe = tk.Frame(card, height=px(3))  # 編集中のタスクのAIの色
+    stripe.pack(fill="x")
+    form = ttk.Frame(card, style="Card.TFrame", padding=(px(18), px(12), px(18), px(16)))
+    form.pack(fill="both", expand=True)
+    form.columnconfigure(0, weight=1)
     form.columnconfigure(1, weight=1)
-    form_head = tk.StringVar(value="新規タスク")
-    ttk.Label(form, textvariable=form_head, style="Head.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+    form_head = tk.StringVar()
+    form_id = tk.StringVar()
     title_var = tk.StringVar()
     ai_var = tk.StringVar(value="Muse")
-    status_var = tk.StringVar(value="未着手")
+    status_var = tk.StringVar(value=STATUS_LABEL["todo"])
     progress_var = tk.IntVar(value=0)
-    ttk.Label(form, text="タイトル").grid(row=1, column=0, sticky="w")
+    progress_text = tk.StringVar(value="0%")
+
+    def field_label(text, row, col=0, span=2):
+        ttk.Label(form, text=text, style="CardMuted.TLabel").grid(
+            row=row, column=col, columnspan=span, sticky="w", pady=(px(12), px(4)))
+
+    ttk.Label(form, textvariable=form_head, style="CardHead.TLabel").grid(row=0, column=0, sticky="w")
+    ttk.Label(form, textvariable=form_id, style="CardMuted.TLabel").grid(row=0, column=1, sticky="e")
+    field_label("タイトル", 1)
     title_entry = ttk.Entry(form, textvariable=title_var)
-    title_entry.grid(row=1, column=1, columnspan=2, sticky="we", padx=4, pady=3)
-    ttk.Label(form, text="AI").grid(row=2, column=0, sticky="w")
-    ai_edit = ttk.Combobox(form, textvariable=ai_var, width=14)
-    ai_edit.grid(row=2, column=1, sticky="w", padx=4, pady=3)
-    ttk.Label(form, text="状態").grid(row=3, column=0, sticky="w")
+    title_entry.grid(row=2, column=0, columnspan=2, sticky="we")
+    field_label("AI", 3, 0, 1)
+    field_label("状態", 3, 1, 1)
+    ai_edit = ttk.Combobox(form, textvariable=ai_var)
+    ai_edit.grid(row=4, column=0, sticky="we", padx=(0, px(10)))
     ttk.Combobox(form, textvariable=status_var, values=[STATUS_LABEL[s] for s in STATUSES],
-                 state="readonly", width=12).grid(row=3, column=1, sticky="w", padx=4, pady=3)
-    ttk.Label(form, text="進捗").grid(row=4, column=0, sticky="w")
-    ttk.Scale(form, variable=progress_var, from_=0, to=100, orient="horizontal",
-              command=lambda v: progress_var.set(round(float(v)))).grid(row=4, column=1, sticky="we", padx=4, pady=3)
-    ttk.Spinbox(form, textvariable=progress_var, from_=0, to=100, increment=5, width=5).grid(row=4, column=2, sticky="w", padx=4)
-    ttk.Label(form, text="このAIへの依頼").grid(row=5, column=0, sticky="nw", pady=3)
-    req_text = tk.Text(form, height=7, width=30, wrap="word", undo=True)
-    req_text.grid(row=5, column=1, columnspan=2, sticky="nsew", padx=4, pady=3)
-    ttk.Label(form, text="メモ").grid(row=6, column=0, sticky="nw", pady=3)
-    notes_text = tk.Text(form, height=5, width=30, wrap="word", undo=True)
-    notes_text.grid(row=6, column=1, columnspan=2, sticky="nsew", padx=4, pady=3)
-    form.rowconfigure(5, weight=2)
-    form.rowconfigure(6, weight=1)
+                 state="readonly").grid(row=4, column=1, sticky="we")
+    field_label("進捗", 5, 0, 1)
+    ttk.Label(form, textvariable=progress_text, style="CardNum.TLabel").grid(row=5, column=1, sticky="se", pady=(px(8), 0))
+    meter = tk.Canvas(form, height=px(14), highlightthickness=0, takefocus=1, cursor="hand2")
+    meter.grid(row=6, column=0, columnspan=2, sticky="we")
+    field_label("このAIへの依頼", 7)
+    text_opts = dict(height=5, width=30, wrap="word", undo=True, relief="flat", borderwidth=0,
+                     highlightthickness=1, padx=px(10), pady=px(8))
+    req_text = tk.Text(form, **text_opts)
+    req_text.grid(row=8, column=0, columnspan=2, sticky="nsew")
+    field_label("メモ", 9)
+    notes_text = tk.Text(form, **text_opts)
+    notes_text.grid(row=10, column=0, columnspan=2, sticky="nsew")
+    form.rowconfigure(8, weight=3)
+    form.rowconfigure(10, weight=2)
 
-    btns = ttk.Frame(form)
-    btns.grid(row=7, column=0, columnspan=3, sticky="we", pady=(8, 0))
-    ttk.Button(btns, text="保存", command=lambda: save_current()).pack(side="left", padx=(0, 4))
-    ttk.Button(btns, text="完了にする", command=lambda: mark_done()).pack(side="left", padx=4)
-    ttk.Button(btns, text="依頼文をコピー", command=lambda: copy_prompt()).pack(side="left", padx=4)
-    ttk.Button(btns, text="新規", command=lambda: new_task()).pack(side="left", padx=4)
-    ttk.Button(btns, text="削除", command=lambda: delete_task()).pack(side="right")
+    btns = ttk.Frame(form, style="Card.TFrame")
+    btns.grid(row=11, column=0, columnspan=2, sticky="we", pady=(px(16), 0))
+    ttk.Button(btns, text="保存", style="Accent.TButton", command=lambda: save_current()).pack(side="left", padx=(0, px(6)))
+    ttk.Button(btns, text="完了にする", command=lambda: mark_done()).pack(side="left", padx=(0, px(6)))
+    ttk.Button(btns, text="依頼文をコピー", command=lambda: copy_prompt()).pack(side="left")
+    ttk.Button(btns, text="削除", style="Danger.TButton", command=lambda: delete_task()).pack(side="right")
 
-    ttk.Label(root, textvariable=status_msg, style="Status.TLabel", padding=(8, 4)).pack(fill="x")
+    # --- 見た目 ---
+    def palette():
+        return THEMES[state["theme"]]
+
+    def set_titlebar():
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            dark = ctypes.c_int(1 if state["theme"] == "dark" else 0)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark))
+        except Exception:
+            pass
+
+    def paint_stripe():
+        p = palette()
+        stripe.configure(bg=ai_color(state["data"]["ais"], ai_var.get()) if state["sel"] else p["accent"])
+
+    def apply_theme():
+        p = palette()
+        root.configure(bg=p["bg"])
+        flat = lambda color: dict(bordercolor=color, lightcolor=color, darkcolor=color)  # noqa: E731
+        style.configure(".", background=p["bg"], foreground=p["text"], fieldbackground=p["field"],
+                        troughcolor=p["raised"], selectbackground=p["accent"], selectforeground=p["on_accent"],
+                        insertcolor=p["text"], focuscolor=p["accent"], font=F["ui"], **flat(p["bg"]))
+        style.configure("Muted.TLabel", foreground=p["muted"])
+        style.configure("Card.TFrame", background=p["surface"])
+        style.configure("CardHead.TLabel", background=p["surface"], foreground=p["text"], font=F["head"])
+        style.configure("CardMuted.TLabel", background=p["surface"], foreground=p["muted"], font=F["small"])
+        style.configure("CardNum.TLabel", background=p["surface"], foreground=p["text"], font=F["num"])
+        for name in ("TEntry", "TCombobox"):
+            style.configure(name, padding=(px(8), px(5)), fieldbackground=p["field"], foreground=p["text"],
+                            background=p["raised"], arrowcolor=p["muted"], bordercolor=p["line"],
+                            lightcolor=p["field"], darkcolor=p["field"])
+            style.map(name, bordercolor=[("focus", p["accent"])], lightcolor=[("focus", p["field"])],
+                      fieldbackground=[("readonly", p["field"])], foreground=[("readonly", p["text"])],
+                      selectbackground=[("readonly", p["field"])], selectforeground=[("readonly", p["text"])],
+                      background=[("active", p["line"])])
+        for opt, key in (("background", "field"), ("foreground", "text"),
+                         ("selectBackground", "accent"), ("selectForeground", "on_accent")):
+            root.option_add(f"*TCombobox*Listbox.{opt}", p[key])
+        style.configure("TButton", padding=(px(14), px(6)), width=-4, background=p["raised"], foreground=p["text"],
+                        relief="flat", **flat(p["raised"]))
+        style.map("TButton", background=[("pressed", p["line"]), ("active", p["line"])],
+                  bordercolor=[("focus", p["accent"])])
+        style.configure("Accent.TButton", background=p["accent"], foreground=p["on_accent"], font=F["bold"],
+                        **flat(p["accent"]))
+        style.map("Accent.TButton", background=[("pressed", p["accent"]), ("active", p["accent_hover"])],
+                  bordercolor=[("focus", p["text"])])
+        style.configure("Danger.TButton", background=p["surface"], foreground=p["status"]["blocked"],
+                        **flat(p["surface"]))
+        style.map("Danger.TButton", background=[("pressed", p["line"]), ("active", p["raised"])])
+        style.configure("Pill.Toolbutton", padding=(px(12), px(4)), background=p["bg"], foreground=p["muted"],
+                        **flat(p["bg"]))
+        style.map("Pill.Toolbutton", background=[("selected", p["raised"]), ("active", p["surface"])],
+                  foreground=[("selected", p["text"]), ("active", p["text"])],
+                  bordercolor=[("selected", p["line"])])
+        style.configure("Treeview", background=p["surface"], fieldbackground=p["surface"], foreground=p["text"],
+                        rowheight=px(32), font=F["ui"], borderwidth=0, **flat(p["surface"]))
+        style.map("Treeview", background=[("selected", p["select"])], foreground=[("selected", p["text"])],
+                  bordercolor=[("focus", p["surface"])], lightcolor=[("focus", p["surface"])],
+                  darkcolor=[("focus", p["surface"])])
+        style.configure("Treeview.Heading", background=p["surface"], foreground=p["muted"], relief="flat",
+                        font=F["small"], padding=(px(6), px(6)), **flat(p["surface"]))
+        style.map("Treeview.Heading", background=[("active", p["raised"])])
+        style.configure("Vertical.TScrollbar", background=p["raised"], troughcolor=p["surface"],
+                        arrowcolor=p["muted"], gripcount=0, **flat(p["surface"]))
+        style.map("Vertical.TScrollbar", background=[("active", p["line"])])
+        style.configure("Sash", sashthickness=px(14), gripcount=0, background=p["bg"], **flat(p["bg"]))
+        for st, color in p["tint"].items():
+            tree.tag_configure(st, background=color)
+        tree.tag_configure("done", foreground=p["muted"])
+        for widget in (req_text, notes_text):
+            widget.configure(bg=p["field"], fg=p["text"], insertbackground=p["text"], selectbackground=p["accent"],
+                             selectforeground=p["on_accent"], highlightbackground=p["line"],
+                             highlightcolor=p["accent"])
+        lanes.configure(bg=p["bg"])
+        theme_btn.configure(text="ライトにする" if state["theme"] == "dark" else "ダークにする")
+        state["bars"].clear()
+        paint_stripe()
+        set_titlebar()
+        refresh_summary()
+        refresh_list()
+
+    def toggle_theme():
+        state["theme"] = "light" if state["theme"] == "dark" else "dark"
+        settings["theme"] = state["theme"]
+        save_ui_settings(path, settings)
+        apply_theme()
+
+    def draw_meter(*_):
+        p = palette()
+        w, h = meter.winfo_width(), meter.winfo_height()
+        meter.delete("all")
+        meter.configure(bg=p["surface"])
+        meter.create_rectangle(0, 0, w, h, fill=p["raised"], width=0)
+        filled = w * get_progress() / 100
+        color = p["status"].get(LABEL_STATUS.get(status_var.get(), "todo"), p["accent"])
+        if filled:
+            meter.create_rectangle(0, 0, filled, h, fill=color, width=0)
+        if str(root.tk.call("focus")) == str(meter):  # focus_get はコンボボックスの一覧で例外を出すことがある
+            meter.create_rectangle(0, 0, w - 1, h - 1, outline=p["accent"])
+
+    def meter_to(x):
+        progress_var.set(max(0, min(100, round(x / max(1, meter.winfo_width()) * 100))))
+
+    def bar_image(status, progress):
+        key = (status, progress)
+        if key not in state["bars"]:
+            p = palette()
+            w, h = px(46), px(6)
+            img = tk.PhotoImage(width=w + px(12), height=h)  # 右の余白は透明 (タイトルとの間)
+            img.put(p["raised"], to=(0, 0, w, h))
+            filled = round(w * max(0, min(100, progress)) / 100)
+            if filled:
+                img.put(p["status"].get(status, p["muted"]), to=(0, 0, filled, h))
+            state["bars"][key] = img
+        return state["bars"][key]
 
     # --- 表示 ---
     def get_progress():
@@ -504,15 +710,46 @@ def run_gui():
         except OSError:
             state["mtime"] = None
 
+    def lane(row, color):
+        p = palette()
+        bg = p["surface"]
+        active = filter_ai.get() == row["ai"]
+        box = tk.Frame(lanes, bg=bg, cursor="hand2", highlightthickness=2,
+                       highlightbackground=color if active else bg)
+        box.pack(side="left", padx=(0, px(10)))
+        tk.Frame(box, bg=color, width=px(4)).pack(side="left", fill="y")
+        inner = tk.Frame(box, bg=bg)
+        inner.pack(side="left", padx=(px(12), px(16)), pady=(px(8), px(10)))
+        tk.Label(inner, text=row["ai"], font=F["bold"], bg=bg, fg=p["text"]).pack(anchor="w")
+        line = tk.Frame(inner, bg=bg)
+        line.pack(anchor="w")
+        tk.Label(line, text=str(row["count"]), font=F["big"], bg=bg, fg=p["text"]).pack(side="left")
+        tk.Label(line, text=lane_detail(row), font=F["small"], bg=bg, fg=p["muted"],
+                 justify="left").pack(side="left", padx=(px(8), 0))
+        w, h, gap = px(170), px(6), px(2)
+        mix = tk.Canvas(inner, width=w, height=h, bg=bg, highlightthickness=0)
+        mix.pack(anchor="w", pady=(px(6), 0))
+        mix.create_rectangle(0, 0, w, h, fill=p["raised"], width=0)
+        x = 0
+        for st in STATUSES:  # 状態の内訳を左から 未着手→完了 の順に
+            n = row["by"].get(st, 0)
+            if n:
+                seg = w * n / row["count"]
+                mix.create_rectangle(x, 0, x + seg - (gap if x + seg < w - 1 else 0), h,
+                                     fill=p["status"][st], width=0)
+                x += seg
+        stack = [box]
+        while stack:
+            widget = stack.pop()
+            widget.bind("<Button-1>", lambda e, a=row["ai"]: root.after_idle(set_ai_filter, a))
+            stack.extend(widget.winfo_children())
+
     def refresh_summary():
-        for w in summary.winfo_children():
-            w.destroy()
-        ttk.Button(summary, text=f"すべて  {len(state['data']['tasks'])}件",
-                   command=lambda: root.after_idle(set_ai_filter, "すべて")).pack(side="left", padx=(0, 6))
+        for widget in lanes.winfo_children():
+            widget.destroy()
+        lane(summarize("すべて", state["data"]["tasks"]), palette()["muted"])
         for row in ai_summary(state["data"]):
-            ttk.Button(summary, text=summary_text(row),
-                       command=lambda a=row[0]: root.after_idle(set_ai_filter, a)).pack(side="left", padx=(0, 6))
-        ai_combo.configure(values=["すべて"] + state["data"]["ais"])
+            lane(row, ai_color(state["data"]["ais"], row["ai"]))
         ai_edit.configure(values=state["data"]["ais"])
 
     def refresh_list():
@@ -522,33 +759,28 @@ def run_gui():
         for t in tasks:
             if tree.exists(t["id"]):  # id が重複していたら先の1件だけ出す
                 continue
-            tree.insert("", "end", iid=t["id"], text=t["title"], tags=(t["status"],),
-                        values=(t["ai"], STATUS_LABEL.get(t["status"], t["status"]),
-                                progress_bar(t["progress"]), local_time(t.get("updated", ""))))
+            tree.insert("", "end", iid=t["id"], text=t["title"], image=bar_image(t["status"], t["progress"]),
+                        tags=(t["status"],),
+                        values=(t["ai"], STATUS_LABEL.get(t["status"], t["status"]), f"{t['progress']}%",
+                                local_time(t.get("updated", ""))))
         for col, k, label, _ in COLUMNS:
             mark = (" ▼" if rev else " ▲") if k == key else ""
             tree.heading(col, text=label + mark)
-        count_msg.set(f"{len(tasks)} / {len(state['data']['tasks'])}件")
+        count_msg.set(f"{len(tasks)} / {len(state['data']['tasks'])}件を表示")
         if state["sel"] and tree.exists(state["sel"]):
             tree.selection_set(state["sel"])
             tree.see(state["sel"])
 
-    def reload(msg=None):
+    def reload():
         state["data"] = load_board(path)
         remember_mtime()
         refresh_summary()
         refresh_list()
-        if msg:
-            say(msg)
 
     def set_ai_filter(ai):
-        filter_ai.set(ai)
+        filter_ai.set("すべて" if filter_ai.get() == ai else ai)  # 同じレーンをもう一度押すと解除
+        refresh_summary()
         refresh_list()
-
-    def clear_filters():
-        filter_ai.set("すべて")
-        filter_status.set("すべて")
-        query.set("")
 
     def sort_by(key):
         cur, rev = state["sort"]
@@ -558,7 +790,8 @@ def run_gui():
     def fill_form(t):
         state["sel"] = t["id"] if t else None
         state["seen"] = dict(t) if t else None
-        form_head.set(f"編集中: {t['id']}" if t else "新規タスク")
+        form_head.set("タスクを編集" if t else "新しいタスク")
+        form_id.set(f"id {t['id']}" if t else "")
         title_var.set(t["title"] if t else "")
         if t:
             ai_var.set(t["ai"])  # 新規のときはAIは直前のまま (続けて同じAIに足しやすい)
@@ -569,6 +802,7 @@ def run_gui():
             widget.insert("1.0", t.get(key, "") if t else "")
             widget.edit_reset()
         state["snapshot"] = form_values()
+        paint_stripe()
 
     def on_select(_event=None):
         sel = tree.selection()
@@ -669,7 +903,6 @@ def run_gui():
         except (OSError, ValueError) as e:
             messagebox.showerror("出力", str(e))
             return
-        remember_mtime()
         say(f"Markdownを出力しました: {md}")
 
     # --- 外部 (AI・CLI) の変更を監視 ---
@@ -694,8 +927,18 @@ def run_gui():
         finally:
             root.after(POLL_MS, poll)  # 何があっても監視は止めない
 
-    for var in (filter_ai, filter_status, query):
+    for var in (filter_status, query):
         var.trace_add("write", lambda *_: refresh_list())
+    progress_var.trace_add("write", lambda *_: (progress_text.set(f"{get_progress()}%"), draw_meter()))
+    status_var.trace_add("write", draw_meter)
+    meter.bind("<Configure>", draw_meter)
+    meter.bind("<FocusIn>", draw_meter)
+    meter.bind("<FocusOut>", draw_meter)
+    meter.bind("<Button-1>", lambda e: (meter.focus_set(), meter_to(e.x)))
+    meter.bind("<B1-Motion>", lambda e: meter_to(e.x))
+    meter.bind("<Left>", lambda e: progress_var.set(max(0, get_progress() - 5)))
+    meter.bind("<Right>", lambda e: progress_var.set(min(100, get_progress() + 5)))
+    ai_var.trace_add("write", lambda *_: paint_stripe())
     tree.bind("<<TreeviewSelect>>", on_select)
     tree.bind("<Delete>", lambda e: delete_task())
     root.bind("<Control-s>", lambda e: (save_current(), "break")[1])
@@ -704,9 +947,15 @@ def run_gui():
     search_entry.bind("<Escape>", lambda e: query.set(""))
 
     remember_mtime()
-    refresh_summary()
-    refresh_list()
     fill_form(None)
+    apply_theme()
+    def place_sash():  # 窓の大きさが決まってから一覧を6割に
+        if body.winfo_width() < 100:
+            root.after(50, place_sash)
+        else:
+            body.sashpos(0, int(body.winfo_width() * 0.6))
+
+    place_sash()
     say(f"{path} を開きました")
     root.after(POLL_MS, poll)
     root.mainloop()

@@ -81,12 +81,18 @@ def main():
 
     # サマリー (平均は未完了だけ)
     rows = b.ai_summary({"ais": ["Claude", "Muse", "Gemini"], "tasks": tasks})
-    assert rows[0] == ("Claude", 2, 0, 0, 0, 1)
-    assert b.summary_text(rows[1]) == "Muse  1件  平均20%  停滞1"
-    assert b.summary_text(rows[2]) == "Gemini  0件"
+    assert rows[0] == {"ai": "Claude", "count": 2, "open": 1, "avg": 0, "by": {"done": 1, "todo": 1}}
+    assert b.lane_detail(rows[1]) == "件  平均 20%\n停滞 1"
+    assert b.lane_detail(rows[2]) == "件\n"
+    assert b.lane_detail(b.summarize("x", tasks[:1])) == "件  すべて完了\n完了 1"
+
+    # AIの色: 決まった3つ以外は順に割り当て
+    ais = ["Claude", "Copilot", "Grok"]
+    assert b.ai_color(ais, "Claude") == "#E0A458"
+    assert b.ai_color(ais, "Grok") == b.EXTRA_AI_COLORS[1]
+    assert b.ai_color(ais, "未登録") == b.EXTRA_AI_COLORS[0]
 
     # 表示用
-    assert b.progress_bar(40) == "████░░░░░░  40%"
     assert b.local_time("bad") == "bad"
     assert len(b.local_time("2026-10-29T06:48:07Z")) == len("10/29 15:48")
     prompt = b.request_prompt(tasks[1])
