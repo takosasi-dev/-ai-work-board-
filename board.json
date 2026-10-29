@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "ais": [
+    "Claude",
+    "Muse",
+    "Gemini"
+  ],
+  "tasks": [
+    {
+      "id": "sample-claude-1",
+      "title": "サンプル: Claudeへの依頼タスク",
+      "ai": "Claude",
+      "status": "in_progress",
+      "progress": 40,
+      "request": "ここにClaudeへお願いしたい作業を書く",
+      "notes": "サンプルです。削除して使ってください。",
+      "created": "2026-10-29T06:48:07Z",
+      "updated": "2026-10-29T06:48:07Z"
+    },
+    {
+      "id": "sample-muse-1",
+      "title": "サンプル: Museへの依頼タスク",
+      "ai": "Muse",
+      "status": "todo",
+      "progress": 0,
+      "request": "ここにMuseへお願いしたい作業を書く",
+      "notes": "サンプルです。削除して使ってください。",
+      "created": "2026-10-29T06:48:07Z",
+      "updated": "2026-10-29T06:48:07Z"
+    },
+    {
+      "id": "sample-gemini-1",
+      "title": "サンプル: Geminiへの依頼タスク",
+      "ai": "Gemini",
+      "status": "todo",
+      "progress": 0,
+      "request": "ここにGeminiへお願いしたい作業を書く",
+      "notes": "サンプルです。削除して使ってください。",
+      "created": "2026-10-29T06:48:07Z",
+      "updated": "2026-10-29T06:48:07Z"
+    }
+  ]
+}
